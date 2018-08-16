@@ -1,0 +1,464 @@
+#coding:utf-8
+import sys
+import pysam
+import os
+from PIL import Image
+
+
+def rearrange_string(read):
+    bases=read.query_sequence   
+
+    bases_checked=0
+    
+    read_len_count=0
+    for cigar_portion in read.cigartuples:
+        if cigar_portion[0]==0:
+            cigar_base = bases[bases_checked:(cigar_portion[1]+bases_checked)]
+            new_bases=new_bases+cigar_base
+            for M_num in range(cigar_portion[1]):
+
+                read_len_count=read_len_count+1
+            bases_checked=bases_checked+cigar_portion[1]
+
+        elif cigar_portion[0]==1:
+            bases_checked=bases_checked+cigar_portion[1]
+            for I_num in range(cigar_portion[1]):
+                read_len_count=read_len_count+1
+        elif cigar_portion[0]==2:
+            cigar_base=''
+            for  i in range(cigar_portion[1]):
+                cigar_base=cigar_base+'d'
+            new_bases=new_bases+cigar_base
+        elif cigar_portion[0]==4 :
+            cigar_base=''
+            for i in range(cigar_portion[1]):
+                cigar_base=cigar_base+'s'
+                read_len_count = read_len_count + 1
+            new_bases=new_bases+cigar_base
+            bases_checked=bases_checked+cigar_portion[1]
+        elif cigar_portion[0]==5 : 
+            cigar_base=''
+            for  i in range(cigar_portion[1]):
+                cigar_base=cigar_base+'h'
+
+            new_bases=new_bases+cigar_base
+
+    return new_bases
+
+def read_can_shown(read,scan_l_pos,scan_r_pos):
+    read_pos1=read.reference_start
+    read_pos2=read.reference_start+read_infered_len(read)
+    if (read_pos2 > scan_l_pos) and (read_pos1 < scan_r_pos):
+        res=True
+        for cigar_portion in read.cigartuples:
+            if not ((cigar_portion[0]==0) or (cigar_portion[0]==1) or (cigar_portion[0]==2) or (cigar_portion[0]==4) or (cigar_portion[0]==5)):
+                res = False
+        return res
+    else:
+        return False
+
+def read_corner_shown(read,scan_l_pos,scan_r_pos,new_bases):
+    read_pos1=read.reference_start
+    read_pos2=read.reference_start+read_infered_len(read)
+    if (read_pos1 < scan_l_pos) and (read_pos2 > scan_l_pos):
+        if ('A' or 'G' or 'C' or 'T' or 'a' or 'g' or 'c' or 't') in new_bases[(scan_l_pos-read_pos1):len(new_bases)] :
+            return True
+        else:
+            return False
+    if (read_pos1 < scan_r_pos) and (read_pos2 > scan_r_pos):
+        if ('A' or 'G' or 'C' or 'T' or 'a' or 'g' or 'c' or 't') in new_bases[0:(scan_r_pos-read_pos1)] :
+            return True
+        else:
+            return False
+    if (read_pos1 >= scan_l_pos) and (read_pos2 <= scan_r_pos):
+        return True
+
+
+def read_infered_len(read):
+    infer_len=0
+    for cigar_portion in read.cigartuples:
+        if ((cigar_portion[0]==0) or (cigar_portion[0]==2) or (cigar_portion[0]==4)):
+            infer_len=infer_len+cigar_portion[1]
+    return infer_len
+
+def is_empty(read_list):
+    tag=True
+    for li in read_list:
+        if li!=[]:
+            tag=False
+            break
+    return tag
+
+def get_shortest_tail_row(read_list,scan_r_pos):
+    if is_empty(read_list):
+        return 0
+    else:
+        tail=scan_r_pos
+        short_row=0
+        for i in range(len(read_list)):
+            if read_list[i]!=[]:
+                if tail > read_list[i][-1][1] :
+                    tail= read_list[i][-1][1]
+                    short_row=i
+        return short_row
+def get_nearest_tail_row(read_list,scan_r_pos,read_pos1,read_pos2):
+    near_row = 0
+    insertId =0
+    out=0
+    for i in range(len(read_list)):
+        if read_list[i]!=[] and out==0:
+            for j in range(len(read_list[i])):
+
+                if j >0 and (read_pos1 >  read_list[i][j-1][1]  ) and (read_pos2 < read_list[i][j][0] ):
+                    near_row=i
+                    insertId=j
+                    out=1
+                    break
+                elif j==len(read_list[i])-1 and read_pos1  > read_list[i][-1][1]:
+                    near_row=i
+                    insertId=len(read_list[i])
+
+
+    if near_row==0 :
+        near_row=find_next_empty_row(read_list)
+        insertId=0
+    return near_row,insertId
+
+def find_next_empty_row(read_list):
+    row=0
+    for i in range(len(read_list)):
+        if read_list[i]==[]:
+            row=i
+            break
+    return row
+def rearrange_read_dictionary(dictionary):
+    soft_clip=[]
+    hard_clip=[]
+    read1=[]
+    read2=[]
+    normal=[]
+
+    new_dic={}
+
+    for line in dictionary.values():
+        tag=0
+        for read in line:
+            if(read[4]==True):
+                tag=4
+                break
+            elif(read[4]==False and read[6]==True):
+                tag=3
+            elif(read[4]==False and read[6]==False and read[5]==False and read[7]==True):
+                tag=2
+            elif (read[4] == False and read[6] == False and read[5] == False and read[7] == False):
+                tag=1
+        if(tag==4):
+            soft_clip.append(line)
+        elif(tag==3):
+            hard_clip.append(line)
+        elif(tag==2):
+            read1.append(line)
+        elif(tag==1):
+            read2.append(line)
+        else:
+            normal.append(line)
+    i=0
+    for j in range(len(normal)):
+        new_dic[i]=normal[j]
+        i+=1
+    for j in range(len(read1)):
+        new_dic[i]=read1[j]
+        i+=1
+    for j in range(len(read2)):
+        new_dic[i]=read2[j]
+        i+=1
+    for j in range(len(soft_clip)):
+        new_dic[i]=soft_clip[j]
+        i+=1
+    for j in range(len(hard_clip)):
+        new_dic[i]=hard_clip[j]
+        i+=1
+    return new_dic
+
+
+def read_to_dictionary(read_package, scan_r_pos,height):
+    dictionary={}
+    read_list=[0 for i in range(height)]
+    for i in range(height):
+        read_list[i]=[]
+    row_ptr=0
+
+
+    base=[]
+    read=[]
+    read_pos1=[]
+    read_pos2=[]
+    quality=[]
+    is_concordant=[]
+    is_clipped=[]
+    hard_clipped=[]
+    is_read1=[]
+    for i in range(len(read_package)):
+        base.append(read_package[i][0])
+        quality.append(read_package[i][1].mapping_quality)
+        read.append(read_package[i][1])
+        if read[i].cigartuples[0][0]==4 or read[i].cigartuples[0][0]==5 :
+            read_pos1.append(read[i].reference_start - read[i].cigartuples[0][1])
+            read_pos2.append(read_pos1[-1]+read_infered_len(read[i]))
+        else:
+            read_pos1.append(read[i].reference_start)
+            read_pos2.append(read_pos1[-1]+read_infered_len(read[i]))
+        if read[i].is_paired:  # read not paired，do not consider this kind of read
+            is_concordant.append(read[i].is_proper_pair)
+            is_read1.append(read[i].is_read1)
+            if 'S' in read[i].cigarstring:
+                is_clipped.append(True)
+            else:
+                is_clipped.append(False)
+
+            if 'H' in read[i].cigarstring:
+                hard_clipped.append(True)
+            else:
+                hard_clipped.append(False)
+         
+    for i in range(height):
+        if (read_package == []):
+            break
+
+        for j in range(len(read_package)):
+            if(read_package ==[] or j >= len(read_package)):
+                break
+            Len=len(read_package)
+            if(read_list[i]==[]):
+                read_list[i].append((read_pos1.pop(0),read_pos2.pop(0),
+                                     base.pop(0),quality.pop(0),is_clipped.pop(0),
+                                     is_concordant.pop(0),hard_clipped.pop(0),is_read1.pop(0)))
+                read.pop(0)
+                read_package.pop(0)
+                if(j>=len(read_package)):
+                    break
+                else:
+                    j=j-1
+
+            elif(read_list[i][-1][1]<read_pos1[j] and read_pos1[j]< scan_r_pos ):
+                read_list[i].append((read_pos1.pop(j),read_pos2.pop(j),
+                                     base.pop(j),quality.pop(j),is_clipped.pop(j),
+                                     is_concordant.pop(j),hard_clipped.pop(j),is_read1.pop(j)))
+                read.pop(j)
+                read_package.pop(j)
+                if(j>=len(read_package)):
+                    break
+                else:
+                    j=j-1
+
+
+    
+    for i in range(height):
+        if(read_list[i]!=[]):
+            dictionary[i]=read_list[i]
+
+    height_new=int(len(dictionary))
+    return dictionary,height_new
+
+def draw_empty(which_bp,dic,width,height,scan_l_pos,scan_r_pos,img_name):
+    newIm = Image.new ("RGB", (width,height),(255,255,255))
+    newIm.save(img_name,"PNG")
+    resIm=newIm.resize((100,100))
+    resIm=newIm.resize((100,100),Image.ANTIALIAS)
+    resIm.save(img_name+'.resize.png',"PNG")
+
+
+def draw_pgn(which_bp,dic,width,height,scan_l_pos,scan_r_pos,img_name):
+    newIm = Image.new ("RGB", (width,height),(255,255,255))
+    for key in range(height):
+        for read_tuple in dic[key]:
+            read_pos1=read_tuple[0]
+            read_pos2=read_tuple[1]
+            base=read_tuple[2]
+            quality=read_tuple[3]
+            is_clipped=read_tuple[4]
+            is_concordant=read_tuple[5]
+            hard_clipped=read_tuple[6]
+            is_read1=read_tuple[7]
+            col=read_pos1-scan_l_pos
+            index_in_read=0
+            for i in range(len(base)):
+                if col >=0  and col < width :
+                    row=key
+                    red,green,blue=get_RGB(which_bp,base[index_in_read],quality,is_clipped,is_concordant,hard_clipped,is_read1)
+                    newIm.putpixel((col,row),(red,green,blue))
+                    index_in_read=index_in_read+1
+                    col=col+1
+                elif col<0:
+                    index_in_read=index_in_read+1
+                    col=col+1
+
+    newIm.save(img_name,"PNG")
+    resIm=newIm.resize((100,100))
+
+    if(width>2060):
+        newLeft=newIm.crop((0,0,1000,height)).resize((20,100),Image.ANTIALIAS)
+        newRight=newIm.crop((width-1000,0,width,height)).resize((20,100),Image.ANTIALIAS)
+        newMiddle=newIm.crop((1000,0,width-1000,height)).resize((60,100),Image.ANTIALIAS)
+        resIm.paste(newLeft,(0,0,20,100))
+        resIm.paste(newMiddle,(20,0,80,100))
+        resIm.paste(newRight,(80,0,100,100))
+        resIm.save(img_name+'.resize.png',"PNG")
+    else:
+        resIm=newIm.resize((100,100),Image.ANTIALIAS)
+        resIm.save(img_name+'.resize.png',"PNG")
+   
+
+def quality_to_vRGB(quality):
+    if(quality>=30):
+        return 0
+    elif(20<=quality<=29):
+        return 50
+    elif(10<=quality<=19):
+        return 100
+    elif(0<=quality<=10):
+        return 180
+
+def get_RGB(which_bp,base,quality,is_clipped,is_concordant,hard_clipped,is_read1):
+    if is_clipped :
+        if base in "atcgATCG":
+            red=0
+            green=255
+            blue=0
+            red=red+quality_to_vRGB(quality)
+            blue=blue+quality_to_vRGB(quality)
+            return red, green, blue
+        elif base=="s":
+            red = 255
+            green = 0
+            blue = 0
+            green = green + quality_to_vRGB(quality)
+            blue = blue + quality_to_vRGB(quality)
+            return red, green, blue
+
+    elif hard_clipped:
+        red=255
+        green=0
+        blue=255
+        if(base=="h"):
+            return 255, 255, 255
+        return red, green, blue
+
+    elif is_concordant:
+        red=0
+        green=255
+        blue=0
+        if quality>1:
+            red=red+quality_to_vRGB(quality)
+            blue=blue+quality_to_vRGB(quality)
+            return red, green, blue
+        elif quality==0 or quality== -1:
+            return 255,255,255
+    elif not is_concordant:
+        red=0
+        green=255
+        blue=0
+        if is_read1:
+            if quality > 1:
+                red=255
+                blue=blue+quality_to_vRGB(quality)
+                return red, green, blue
+            elif base == 's' or base == 'd': 
+                return 255, 255, 255
+        else:
+            if quality > 1:
+                blue=255
+                red = red + quality_to_vRGB(quality)
+                return red, green, blue
+            elif base == 's' or base == 'd': 
+                return 255, 255, 255
+    return 255, 255, 255
+
+def get_range(b1,b2):
+    tmp=str(abs(b2-b1))
+    high_bit=int(tmp[0])+1
+    new_tmp=str(high_bit)
+    for i in range(1,len(tmp)):
+        new_tmp=new_tmp+'0'
+    new_tmp=int(new_tmp)
+    width= new_tmp+400
+    height=150
+    scan_l_pos= int(b1-(new_tmp-(b2-b1))/2-200)
+    scan_r_pos=scan_l_pos+width
+
+    return width,height,scan_l_pos,scan_r_pos
+
+def usage():
+    print ("cnnCNV version 1.4.3b7, 20180504")
+    print ("Program: cnnCNV_genImg")
+    print ("Contact: StudMs <dms@mail.buct.edu.cn>")
+	print ("")
+	print ("usage: cnnCNV_genImg <bed_path> <bam_path> <sample_name> <out_dir> <tool_label>")
+    print ("example: </path/to/vcf.bed> </path/to/bam.bam> <NA12878> </path/to/output/> <delly/freec/cnvnator/readdepth/breakdancer>")
+	print ("Note: fields of bed")
+	print ("	<chr> <left_breakpoint> <right_breakpoint> <copy_number_label>")
+	print ("	file name of output img: /dir/<sample_name>-<chr>-<left_breakpoint>-<right_breakpoint>-<copy_number_label>-<length_of_cnv>-<tool_label>")
+    return 0
+
+def main():
+    if(len(sys.argv )<6):
+        usage()
+        sys.exit()
+
+    vcf_path=sys.argv[1]
+    bam_path=sys.argv[2]
+
+    sample=sys.argv[3]
+    out_dir=sys.argv[4]
+    toolName=sys.argv[5]
+
+    for line in open(vcf_path):
+        line = line.strip()				
+        line = line.split('\t')
+        scan_l_pos = int(line[1])-500
+        scan_r_pos = int(line[2])+500
+        svLen=scan_r_pos-scan_l_pos
+        picLabel = line[3]
+        picLabel=picLabel.replace('|','_')
+        print(scan_l_pos,scan_r_pos)
+        chrom = line[0].strip('\t').strip(' ')
+        pOpen=os.popen('samtools depth -r '+chrom+':'+str(scan_l_pos)+'-'+str(scan_r_pos)+' '+bam_path)
+        sysLine=pOpen.readlines()
+        pOpen.close()
+        depthLines=[]
+        for dep in sysLine:
+            depthLines.append(int(dep.strip('\n').split('\t')[2]))
+        if(len(depthLines)==0):
+                height=1
+        else:
+                height=int(max(depthLines))*2
+        width = scan_r_pos - scan_l_pos
+
+        img_name=str(out_dir)+sample+'-'+chrom+"-"+str(scan_l_pos)+'-'+str(scan_r_pos)+'-'+picLabel+'-'+str(svLen)+'-'+str(toolName)+'.png'
+        read_package=[]
+        c=0
+        samfile = pysam.AlignmentFile(bam_path, "rb")
+        if(scan_l_pos<0):
+                scan_l_pos=1
+                scan_r_pos=scan_r_pos-scan_l_pos+1
+        for read in samfile.fetch(chrom, scan_l_pos,scan_r_pos):
+            if (read.cigarstring != None) and read_can_shown(read,scan_l_pos,scan_r_pos) and read.mapping_quality >10:	
+                new_bases= rearrange_string(read)
+                if read_corner_shown(read,scan_l_pos,scan_r_pos,new_bases):
+                    read_package.append((new_bases, read))
+                    c=c+1
+        dic,height_new=read_to_dictionary(read_package, scan_r_pos,height)
+        new_dic=rearrange_read_dictionary(dic)
+        print ('ok')
+        if not c==0 :
+            print(c)
+            draw_pgn('left',dic,width,height_new,scan_l_pos,scan_r_pos,img_name)
+        else:
+            print("empty")
+            draw_empty('left',dic,100,100,scan_l_pos,scan_r_pos,img_name)        
+
+
+
+if __name__ == '__main__':
+    main()
+
